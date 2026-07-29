@@ -39,18 +39,131 @@ Average highway speed is modeled at 55 mph for a loaded CMV; route distance come
 
 ## Architecture
 
-```
-                    ┌─────────────────────────── Docker Compose ───────────────────────────┐
- Browser ── http ───► nginx (edge) ──┬──► React SPA (built, nginx)                         │
-                    │                └──► Django + gunicorn ──► PostgreSQL                 │
-                    │                          │    ▲                                      │
-                    │                          ▼    │ cache: geocodes, routes              │
-                    │                        Redis ◄┴── Celery worker + beat               │
-                    └──────────────────────────────────────────────────────────────────────┘
- External (free, no API key): OSRM routing · Nominatim geocoding · OSM/CARTO map tiles
+```mermaid
+flowchart LR
+    U([Browser]) -->|HTTP :80| N[nginx<br/>edge reverse proxy]
+    N -->|"/"| FE[React SPA<br/>static, nginx]
+    N -->|"/api"| BE[Django + DRF<br/>gunicorn]
+
+    subgraph Data
+        DB[(PostgreSQL<br/>trips)]
+        RC[(Redis<br/>cache + broker)]
+    end
+
+    BE --> DB
+    BE <-->|"cached geocodes & routes"| RC
+    BE -.->|"enqueue (async mode)"| RC
+    RC -.-> W[Celery worker]
+    BT[Celery beat<br/>nightly cleanup] -.-> RC
+    W --> DB
+
+    BE -->|routing| OSRM[[OSRM API<br/>free, no key]]
+    BE -->|geocoding| NOM[[Nominatim API<br/>free, no key]]
 ```
 
 **Why the API is fast:** geocoding results (30-day TTL) and road routes (7-day TTL) are cached in Redis, so repeated or similar trips are served in milliseconds without touching external services. The HOS simulation itself is pure in-memory computation (<1 ms). Celery handles background work — an async planning mode (`POST /api/trips/?mode=async`) and a nightly beat job that prunes stale trips.
+
+## Core design — class diagram
+
+```mermaid
+classDiagram
+    direction LR
+
+    class TripViewSet {
+        +create(request)
+        +retrieve(id)
+        +list()
+    }
+    class Trip {
+        +UUID id
+        +str current_location
+        +str pickup_location
+        +str dropoff_location
+        +float current_cycle_used
+        +str status
+        +JSON result
+        +datetime created_at
+    }
+    class planner {
+        +plan_trip(locations, cycle_used) dict
+    }
+    class geocoding {
+        +geocode(query) dict
+        +suggest(query) list
+    }
+    class routing {
+        +get_route(waypoints) dict
+        +point_at_mile(route, mile) latlon
+    }
+    class HosSimulator {
+        +float cycle_used
+        +float time
+        +float odometer
+        +float driving_in_shift
+        +float driving_since_break
+        +List~DutyEvent~ events
+        +drive(miles, label)
+        +on_duty_task(kind, hours, label)
+        -_rest()  10h sleeper
+        -_break30()  30min break
+        -_restart()  34h reset
+    }
+    class DutyEvent {
+        +str status
+        +str kind
+        +float start
+        +float end
+        +float miles
+        +float odometer_end
+    }
+    class logs {
+        +build_daily_logs(events, start) list
+    }
+    class plan_trip_task {
+        <<celery>>
+    }
+
+    TripViewSet --> planner : sync path
+    TripViewSet --> plan_trip_task : async path
+    plan_trip_task --> planner
+    TripViewSet --> Trip : persists
+    planner --> geocoding
+    planner --> routing
+    planner --> HosSimulator : simulate_trip()
+    planner --> logs
+    HosSimulator "1" *-- "many" DutyEvent
+```
+
+## Database
+
+A deliberately lean schema: inputs are columns, the computed plan is a single
+JSON document written once and always read as a unit.
+
+```mermaid
+erDiagram
+    TRIP {
+        uuid id PK
+        varchar current_location
+        varchar pickup_location
+        varchar dropoff_location
+        float current_cycle_used
+        varchar status "processing | completed | failed"
+        text error
+        jsonb result "route + summary + stops + schedule + logs"
+        timestamptz created_at "indexed"
+    }
+```
+
+The `result` document embeds five sub-structures:
+
+```mermaid
+flowchart TD
+    R[result JSON] --> A[route<br/>distance, polyline geometry, legs]
+    R --> B[summary<br/>hours, days, stop counts, cycle after]
+    R --> C[stops<br/>typed map markers with times & odometer]
+    R --> D[schedule<br/>ordered duty events]
+    R --> E[logs<br/>one ELD sheet per day: segments, totals, remarks]
+```
 
 ## Repo layout
 
@@ -69,7 +182,7 @@ trips/
   tests/             engine + log-splitting tests (12 tests)
 docker-compose.yml   full stack (expects ../frontend cloned alongside)
 nginx/               edge reverse proxy config
-scripts/             setup-ec2.sh (one-time provisioning) · deploy.sh (CI deploys)
+scripts/             infrastructure automation
 ```
 
 ## Running locally (Docker — recommended)
@@ -137,45 +250,10 @@ python manage.py test trips
 ```
 </details>
 
-## Deployment (single EC2 instance, t3.small)
-
-Everything — frontend, API, workers, databases — runs on one box behind the edge nginx (same origin, no CORS needed). One-time provisioning on a fresh instance (Amazon Linux 2023 or Ubuntu):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/MahrukhMuzzamil/TruckDriverLog-Backend/main/scripts/setup-ec2.sh | bash
-```
-
-This installs Docker, adds swap, clones both repos into `~/TruckDriverLog`, generates a `SECRET_KEY`, and starts the stack on port 80. Security group must allow inbound 22 (SSH) and 80 (HTTP). Add TLS with certbot or an ALB if you attach a domain.
-
-## CI/CD (GitHub Actions → EC2)
-
-Every push to `main` tests, then deploys automatically:
-
-| Repo | Pipeline |
-|---|---|
-| Backend | Django checks + 12-test suite (py3.12) → SSH deploy: rebuild `backend`/`worker`/`beat` |
-| Frontend | `npm ci` + production build → SSH deploy: rebuild `frontend` |
-
-Deploys run [`scripts/deploy.sh`](scripts/deploy.sh) on the instance (git reset to `origin/main`, rebuild only the affected services, prune images, then **fail the pipeline unless `/api/health/` comes back up**). A shared `ec2-deploy` concurrency group prevents overlapping deploys across the two repos.
-
-**Setup — once:**
-
-1. Generate a dedicated ED25519 deploy key (don't reuse your instance login key):
-   ```bash
-   ssh-keygen -t ed25519 -f deploy_key -C "github-actions" -N ""
-   cat deploy_key.pub >> ~/.ssh/authorized_keys        # on the EC2 instance
-   ```
-2. In **both repos** → Settings → Secrets and variables → Actions, add:
-
-   | Secret | Value |
-   |---|---|
-   | `EC2_HOST` | Instance public IP / DNS |
-   | `EC2_USER` | `ec2-user` (Amazon Linux) or `ubuntu` (Ubuntu) |
-   | `EC2_SSH_KEY` | Contents of the private `deploy_key` file |
-
 ## Engineering notes
 
 - **HOS engine is pure & unit-tested** — no I/O, deterministic, covered by tests for break insertion, daily limits, fuel cadence, cycle restart and mile conservation (`trips/tests/`).
 - **Documented simplification:** instead of the rolling 8-day recap, the planner takes a 34-hour restart when the 70-hour cycle runs out mid-trip — always a legal, conservative choice.
 - **12-factor config:** everything via environment variables; same image in dev and prod.
+- **CI/CD:** GitHub Actions runs the test suite on every push and PR, and continuously deploys `main` to AWS (Docker Compose behind nginx).
 - Non-root Docker user, healthchecked services, throttled API, consistent error envelope.
