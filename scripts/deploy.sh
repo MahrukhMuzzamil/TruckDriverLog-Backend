@@ -28,13 +28,17 @@ case "$TARGET" in
     pull "$BACKEND_DIR"
     log "Rebuilding backend services"
     docker compose build backend
-    docker compose up -d backend worker beat nginx
+    docker compose up -d backend worker beat
+    # nginx caches upstream IPs at startup; restart it so it picks up the
+    # recreated backend container.
+    docker compose restart nginx
     ;;
   frontend)
     pull "$FRONTEND_DIR"
     log "Rebuilding frontend"
     docker compose build frontend
     docker compose up -d frontend
+    docker compose restart nginx
     ;;
   all)
     pull "$BACKEND_DIR"

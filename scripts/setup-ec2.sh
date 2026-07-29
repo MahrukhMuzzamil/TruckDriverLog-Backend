@@ -58,6 +58,8 @@ if [ ! -f .env ]; then
   cp .env.example .env
   SECRET=$(head -c 48 /dev/urandom | base64 | tr -d '=+/')
   sed -i "s|^SECRET_KEY=.*|SECRET_KEY=$SECRET|" .env
+  # Serve on the instance's public IP/DNS (edge nginx is the only exposed port)
+  sed -i "s|^ALLOWED_HOSTS=.*|ALLOWED_HOSTS=*|" .env
   echo "Generated SECRET_KEY. Review ALLOWED_HOSTS/CORS in .env if using a domain."
 fi
 
