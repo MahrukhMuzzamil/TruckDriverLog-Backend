@@ -18,12 +18,17 @@ if ! command -v docker >/dev/null 2>&1; then
     # Amazon Linux 2023 / RHEL family
     sudo dnf install -y docker git
     sudo systemctl enable --now docker
-    # docker compose v2 plugin (not packaged on AL2023)
+    # compose v2 + buildx plugins (not packaged on AL2023)
     sudo mkdir -p /usr/local/lib/docker/cli-plugins
     sudo curl -fsSL \
       "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" \
       -o /usr/local/lib/docker/cli-plugins/docker-compose
-    sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+    BUILDX_TAG=$(curl -fsSL https://api.github.com/repos/docker/buildx/releases/latest | grep -oP '"tag_name":\s*"\K[^"]+')
+    BUILDX_ARCH=$(uname -m); [ "$BUILDX_ARCH" = "x86_64" ] && BUILDX_ARCH=amd64; [ "$BUILDX_ARCH" = "aarch64" ] && BUILDX_ARCH=arm64
+    sudo curl -fsSL \
+      "https://github.com/docker/buildx/releases/download/${BUILDX_TAG}/buildx-${BUILDX_TAG}.linux-${BUILDX_ARCH}" \
+      -o /usr/local/lib/docker/cli-plugins/docker-buildx
+    sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-buildx
   else
     # Ubuntu / Debian
     curl -fsSL https://get.docker.com | sudo sh
