@@ -2,7 +2,7 @@
 
 A full-stack application that takes a trip's details and produces **route instructions with every FMCSA-mandated stop** plus **auto-drawn Driver's Daily Log (ELD) sheets** — Django, React, PostgreSQL, Redis, Celery and nginx, fully containerized with Docker.
 
-> **Live demo:** _add your EC2/Vercel URL here_
+> **Live demo:** _add your EC2 URL here_
 > **Loom walkthrough:** _add your Loom link here_
 
 | Repo | Contents |
