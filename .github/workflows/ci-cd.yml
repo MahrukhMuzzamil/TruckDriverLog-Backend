@@ -1,0 +1,53 @@
+name: Backend CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Lint-check & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Django system checks
+        env:
+          DATABASE_URL: sqlite:///ci.sqlite3
+          SECRET_KEY: ci-only
+        run: python manage.py check
+
+      - name: Run test suite
+        env:
+          DATABASE_URL: sqlite:///ci.sqlite3
+          SECRET_KEY: ci-only
+        run: python manage.py test trips --verbosity 2
+
+  deploy:
+    name: Deploy to EC2
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ec2-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 15m
+          script: bash ~/TruckDriverLog/scripts/deploy.sh backend
