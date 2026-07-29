@@ -19,6 +19,10 @@ GEOCODE_TTL = 60 * 60 * 24 * 30  # 30 days
 SUGGEST_TTL = 60 * 60 * 24 * 7  # 7 days
 REQUEST_TIMEOUT = 10
 
+# FMCSA HOS is a North-American domain: constrain results to the road
+# network a US property carrier can actually reach.
+COUNTRY_CODES = "us,ca,mx"
+
 
 def _cache_key(prefix: str, query: str) -> str:
     digest = hashlib.md5(query.strip().lower().encode()).hexdigest()
@@ -45,14 +49,20 @@ def _nominatim_get(path: str, params: dict) -> list:
 
 def geocode(query: str) -> dict:
     """Resolve a free-text location to {name, lat, lon}."""
-    key = _cache_key("geo", query)
+    key = _cache_key("geo2", query)
     cached = cache.get(key)
     if cached:
         return cached
 
     results = _nominatim_get(
         "/search",
-        {"q": query, "format": "json", "limit": 1, "addressdetails": 0},
+        {
+            "q": query,
+            "format": "json",
+            "limit": 1,
+            "addressdetails": 0,
+            "countrycodes": COUNTRY_CODES,
+        },
     )
     if not results:
         raise GeocodingError(f'Could not find a location matching "{query}".')
@@ -73,14 +83,20 @@ def suggest(query: str, limit: int = 5) -> list:
     if len(query.strip()) < 3:
         return []
 
-    key = _cache_key(f"sug{limit}", query)
+    key = _cache_key(f"sug2-{limit}", query)
     cached = cache.get(key)
     if cached is not None:
         return cached
 
     results = _nominatim_get(
         "/search",
-        {"q": query, "format": "json", "limit": limit, "addressdetails": 0},
+        {
+            "q": query,
+            "format": "json",
+            "limit": limit,
+            "addressdetails": 0,
+            "countrycodes": COUNTRY_CODES,
+        },
     )
     suggestions = [
         {

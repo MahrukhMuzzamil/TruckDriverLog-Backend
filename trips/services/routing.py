@@ -55,17 +55,30 @@ def get_route(waypoints: list) -> dict:
             params={"overview": "full", "geometries": "geojson", "steps": "false"},
             timeout=REQUEST_TIMEOUT,
         )
-        response.raise_for_status()
-        data = response.json()
     except requests.RequestException as exc:
         logger.warning("OSRM request failed: %s", exc)
         raise RoutingError(
             "The routing service is temporarily unavailable. Please try again."
         ) from exc
 
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+
+    if response.status_code >= 500:
+        raise RoutingError(
+            "The routing service is temporarily unavailable. Please try again."
+        )
+
+    # OSRM reports unroutable pairs via `code` (NoRoute/NoSegment/...) —
+    # that's a problem with the chosen locations, not with the service.
     if data.get("code") != "Ok" or not data.get("routes"):
         raise RoutingError(
-            "No drivable route could be found between those locations."
+            "No drivable road route exists between those locations. "
+            "Double-check each location (all must be reachable by truck "
+            "within North America).",
+            status_code=400,
         )
 
     route = data["routes"][0]
